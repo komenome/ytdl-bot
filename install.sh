@@ -21,6 +21,8 @@ UPDATE_SCRIPT="/usr/local/sbin/ytdl-bot-update"
 TMP_DIR=""
 STAGE_DIR=""
 OLD_DIR=""
+CONFIG_TMP=""
+INSTALL_OK=0
 
 log() { printf '[ytdl-bot] %s\n' "$*"; }
 warn() { printf '[ytdl-bot] WARNING: %s\n' "$*" >&2; }
@@ -28,11 +30,26 @@ die() { printf '[ytdl-bot] ERROR: %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
     local status=$?
+    if [ -n "${CONFIG_TMP:-}" ]; then
+        rm -f "$CONFIG_TMP"
+    fi
     if [ -n "${TMP_DIR:-}" ]; then
         rm -rf "$TMP_DIR"
     fi
     if [ -n "${STAGE_DIR:-}" ]; then
         rm -rf "$STAGE_DIR"
+    fi
+    if [ "$status" -ne 0 ] && [ "$INSTALL_OK" -eq 0 ] \
+        && [ -n "${OLD_DIR:-}" ] && [ -d "$OLD_DIR" ]; then
+        log "restoring the previous installation"
+        systemctl stop ytdl-bot.service >/dev/null 2>&1 || true
+        rm -rf "$INSTALL_DIR"
+        mv "$OLD_DIR" "$INSTALL_DIR"
+        if [ -f "$INSTALL_DIR/update.sh" ]; then
+            install -m 0755 "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT" || true
+        fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl start ytdl-bot.service >/dev/null 2>&1 || true
     fi
     exit "$status"
 }
@@ -124,6 +141,17 @@ if [ "$KEEP_CONFIG" -eq 0 ]; then
         || die "invalid bot token. Expected the value from @BotFather, like 123456789:AA..."
 fi
 
+BOT_USERNAME=""
+if [ -n "$TOKEN" ]; then
+    log "verifying the bot token with Telegram"
+    get_me=$(curl -fsS --max-time 20 \
+        "https://api.telegram.org/bot${TOKEN}/getMe") \
+        || die "Telegram rejected the bot token (or the API is unreachable)"
+    BOT_USERNAME=$(printf '%s' "$get_me" \
+        | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' | head -n 1)
+    [ -n "$BOT_USERNAME" ] || die "unexpected response from Telegram getMe"
+fi
+
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     log "creating system user $SERVICE_USER"
     if command -v useradd >/dev/null 2>&1; then
@@ -191,25 +219,12 @@ chmod -R go-w "$STAGE_DIR"
 if systemctl is-active --quiet ytdl-bot.service 2>/dev/null; then
     log "stopping the existing service"
 fi
-systemctl stop ytdl-bot.service >/dev/null 2>&1 || true
-
-OLD_DIR="${INSTALL_DIR}.installer-old"
-rm -rf "$OLD_DIR"
-if [ -d "$INSTALL_DIR" ]; then
-    mv "$INSTALL_DIR" "$OLD_DIR"
-fi
-mv "$STAGE_DIR" "$INSTALL_DIR"
-STAGE_DIR=""
-
-install -m 0755 "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT"
-install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot.service" /etc/systemd/system/ytdl-bot.service
-install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot-update.service" /etc/systemd/system/ytdl-bot-update.service
-install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot-update.timer" /etc/systemd/system/ytdl-bot-update.timer
 
 if [ "$KEEP_CONFIG" -eq 0 ]; then
-    log "writing $CONFIG_FILE"
+    log "preparing $CONFIG_FILE"
+    CONFIG_TMP="${CONFIG_FILE}.new.$$"
     umask 077
-    cat > "$CONFIG_FILE" <<EOF
+    cat > "$CONFIG_TMP" <<EOF
 # ytdl-bot configuration. See https://github.com/${REPO}#configuration
 bot_token = "${TOKEN}"
 
@@ -227,27 +242,40 @@ info_timeout_secs = 60
 data_dir = "${STATE_DIR}"
 cookies_file = ""
 EOF
-    chown root:"$SERVICE_USER" "$CONFIG_FILE"
-    chmod 0640 "$CONFIG_FILE"
+    chown root:"$SERVICE_USER" "$CONFIG_TMP"
+    chmod 0640 "$CONFIG_TMP"
+    CHECK_CONFIG="$CONFIG_TMP"
 else
     log "keeping the existing $CONFIG_FILE"
     chown root:"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
     chmod 0640 "$CONFIG_FILE" 2>/dev/null || true
+    CHECK_CONFIG="$CONFIG_FILE"
 fi
 
 log "running a self-check"
-if ! "$INSTALL_DIR/ytdl-bot" --check --config "$CONFIG_FILE"; then
-    warn "self-check failed; restoring the previous installation"
-    systemctl stop ytdl-bot.service >/dev/null 2>&1 || true
-    rm -rf "$INSTALL_DIR"
-    if [ -d "$OLD_DIR" ]; then
-        mv "$OLD_DIR" "$INSTALL_DIR"
-        install -m 0755 "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT" 2>/dev/null || true
-        systemctl daemon-reload || true
-        systemctl start ytdl-bot.service >/dev/null 2>&1 || true
-    fi
-    die "installation failed the self-check; fix the errors above and rerun"
+if ! "$STAGE_DIR/ytdl-bot" --check --config "$CHECK_CONFIG"; then
+    die "installation failed the self-check; nothing was changed"
 fi
+
+systemctl stop ytdl-bot.service >/dev/null 2>&1 || true
+
+if [ -n "$CONFIG_TMP" ]; then
+    mv -f "$CONFIG_TMP" "$CONFIG_FILE"
+    CONFIG_TMP=""
+fi
+
+OLD_DIR="${INSTALL_DIR}.installer-old"
+rm -rf "$OLD_DIR"
+if [ -d "$INSTALL_DIR" ]; then
+    mv "$INSTALL_DIR" "$OLD_DIR"
+fi
+mv "$STAGE_DIR" "$INSTALL_DIR"
+STAGE_DIR=""
+
+install -m 0755 "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT"
+install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot.service" /etc/systemd/system/ytdl-bot.service
+install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot-update.service" /etc/systemd/system/ytdl-bot-update.service
+install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot-update.timer" /etc/systemd/system/ytdl-bot-update.timer
 
 systemctl daemon-reload
 systemctl enable ytdl-bot.service ytdl-bot-update.timer >/dev/null
@@ -281,14 +309,8 @@ if [ "$started" -lt 2 ]; then
     die "installation failed to start; check the logs above"
 fi
 
+INSTALL_OK=1
 rm -rf "$OLD_DIR"
-
-BOT_USERNAME=""
-if [ -n "$TOKEN" ]; then
-    BOT_USERNAME=$(curl -fsS --max-time 10 \
-        "https://api.telegram.org/bot${TOKEN}/getMe" 2>/dev/null \
-        | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' | head -n 1 || true)
-fi
 
 echo
 log "✅ ytdl-bot is installed and running."

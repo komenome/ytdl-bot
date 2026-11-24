@@ -17,8 +17,8 @@ TOKEN=""
 ADMIN=""
 TMP_DIR=""
 OLD_DIR=""
-NEW_INSTALLED=0
 MAINT_OWNED=0
+INSTALL_OK=0
 
 log() { printf '[ytdl-bot-update] %s\n' "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -37,11 +37,19 @@ cleanup() {
     if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR"
     fi
+    if [ "$INSTALL_OK" -eq 0 ] && [ -n "$OLD_DIR" ] && [ -d "$OLD_DIR" ]; then
+        log "restoring the previous installation"
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+        rm -rf "$INSTALL_DIR"
+        mv "$OLD_DIR" "$INSTALL_DIR"
+        if [ -f "$INSTALL_DIR/update.sh" ]; then
+            install_atomic "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT" 0755 || true
+        fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl start "$SERVICE" >/dev/null 2>&1 || true
+    fi
     if [ "$MAINT_OWNED" -eq 1 ]; then
         rm -f "$MAINT_FLAG"
-    fi
-    if [ "$NEW_INSTALLED" -eq 1 ] && [ ! -d "$INSTALL_DIR" ] && [ -d "$OLD_DIR" ]; then
-        mv "$OLD_DIR" "$INSTALL_DIR"
     fi
     exit "$status"
 }
@@ -108,19 +116,19 @@ rollback() {
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     rm -rf "$INSTALL_DIR"
     mv "$OLD_DIR" "$INSTALL_DIR"
-    NEW_INSTALLED=0
     if [ -f "$INSTALL_DIR/update.sh" ]; then
-        install_atomic "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT" 0755
+        install_atomic "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT" 0755 \
+            || log "could not restore $UPDATE_SCRIPT"
     fi
     if [ -d "$INSTALL_DIR/systemd" ]; then
         install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot.service" \
-            /etc/systemd/system/ytdl-bot.service
+            /etc/systemd/system/ytdl-bot.service || true
         install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot-update.service" \
-            /etc/systemd/system/ytdl-bot-update.service
+            /etc/systemd/system/ytdl-bot-update.service || true
         install -m 0644 "$INSTALL_DIR/systemd/ytdl-bot-update.timer" \
-            /etc/systemd/system/ytdl-bot-update.timer
+            /etc/systemd/system/ytdl-bot-update.timer || true
     fi
-    systemctl daemon-reload
+    systemctl daemon-reload || true
     systemctl start "$SERVICE" >/dev/null 2>&1 || true
     notify "❌ ytdl-bot update failed ($reason). Rolled back to ${CURRENT_TAG:-the previous version}."
     exit 1
@@ -242,7 +250,6 @@ if [ -d "$INSTALL_DIR" ]; then
     mv "$INSTALL_DIR" "$OLD_DIR"
 fi
 mv "$NEW_ROOT" "$INSTALL_DIR"
-NEW_INSTALLED=1
 
 install_atomic "$INSTALL_DIR/update.sh" "$UPDATE_SCRIPT" 0755
 
@@ -280,8 +287,8 @@ if [ "$stable_checks" -lt 2 ]; then
     rollback "$SERVICE did not stay running"
 fi
 
+INSTALL_OK=1
 rm -rf "$OLD_DIR"
-NEW_INSTALLED=0
 rm -f "$MAINT_FLAG"
 MAINT_OWNED=0
 
