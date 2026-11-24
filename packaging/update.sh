@@ -210,7 +210,7 @@ log "verifying checksum"
 ) || die "checksum verification failed"
 
 log "extracting"
-tar -xJf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
+tar --no-same-owner -xJf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
 NEW_ROOT="$TMP_DIR/ytdl-bot"
 [ -x "$NEW_ROOT/ytdl-bot" ] || die "release bundle has no ytdl-bot binary"
 [ -x "$NEW_ROOT/bin/yt-dlp" ] || die "release bundle has no bin/yt-dlp"

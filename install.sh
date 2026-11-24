@@ -190,7 +190,7 @@ else
 fi
 
 log "extracting"
-tar -xJf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
+tar --no-same-owner -xJf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
 SRC="$TMP_DIR/ytdl-bot"
 [ -x "$SRC/ytdl-bot" ] || die "release bundle has no ytdl-bot binary"
 [ -x "$SRC/bin/yt-dlp" ] || die "release bundle has no bin/yt-dlp"

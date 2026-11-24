@@ -160,7 +160,7 @@ jobs:
             exit 1
           fi
 
-          tar -C dist -cJf "dist/${ASSET_NAME}" ytdl-bot
+          tar --numeric-owner --owner=0 --group=0 -C dist -cJf "dist/${ASSET_NAME}" ytdl-bot
           (cd dist && sha256sum "${ASSET_NAME}" versions.json > SHA256SUMS)
           ls -lh "dist/${ASSET_NAME}" dist/versions.json dist/SHA256SUMS
 
