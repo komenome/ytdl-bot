@@ -1,0 +1,13 @@
+[Unit]
+Description=Update ytdl-bot to the latest GitHub release
+Documentation=https://github.com/komenome/ytdl-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ytdl-bot-update
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+NoNewPrivileges=true

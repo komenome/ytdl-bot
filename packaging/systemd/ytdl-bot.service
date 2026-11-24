@@ -1,0 +1,48 @@
+[Unit]
+Description=ytdl-bot Telegram YouTube downloader
+Documentation=https://github.com/komenome/ytdl-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ytdl-bot
+Group=ytdl-bot
+WorkingDirectory=/opt/ytdl-bot
+Environment=HOME=/var/lib/ytdl-bot
+Environment=XDG_CACHE_HOME=/var/lib/ytdl-bot/.cache
+Environment=RUST_LOG=info,ytdl_bot=info
+ExecStart=/opt/ytdl-bot/ytdl-bot --config /etc/ytdl-bot/config.toml
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Runtime state and temp downloads live here.
+StateDirectory=ytdl-bot
+StateDirectoryMode=0750
+CacheDirectory=ytdl-bot
+CacheDirectoryMode=0750
+UMask=0077
+
+# Hardening. The bot only needs to read its own installation and config,
+# write to its state directory, and make outbound network connections.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

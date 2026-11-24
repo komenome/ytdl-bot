@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Local tool binaries (downloaded by CI / used for local testing)
+/yt-dlp
+/ffmpeg
+/ffprobe
+/bin/
+
+# Runtime files
+/config.toml
+/cookies.txt
+/data/
+/dist/
+*.log
+.env
+
+# Release artifacts
+*.tar.xz
+*.tar.gz
+*.zip
+SHA256SUMS
+
+# Python
+__pycache__/
+*.pyc

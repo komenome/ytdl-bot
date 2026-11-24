@@ -1,0 +1,210 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Daily check for new yt-dlp / FFmpeg builds (20:00 UTC).
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  ASSET_NAME: ytdl-bot-linux-x86_64.tar.xz
+  FFMPEG_ASSET: ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
+  FFMPEG_URL: https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
+  YTDLP_URL: https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools xz-utils python3
+
+      - name: Download yt-dlp
+        run: |
+          mkdir -p tools/bin
+          curl -fsSL --retry 5 --retry-delay 5 -o tools/bin/yt-dlp "$YTDLP_URL"
+          chmod +x tools/bin/yt-dlp
+          tools/bin/yt-dlp --version
+
+      - name: Download FFmpeg
+        run: |
+          curl -fsSL --retry 5 --retry-delay 5 -o ffmpeg.tar.xz "$FFMPEG_URL"
+          mkdir -p ffmpeg-extract
+          tar -xJf ffmpeg.tar.xz -C ffmpeg-extract --strip-components=1
+          test -x ffmpeg-extract/bin/ffmpeg
+          test -x ffmpeg-extract/bin/ffprobe
+          cp ffmpeg-extract/bin/ffmpeg ffmpeg-extract/bin/ffprobe tools/bin/
+          chmod +x tools/bin/ffmpeg tools/bin/ffprobe
+
+      - name: Read tool versions
+        id: tools
+        run: |
+          set -euo pipefail
+          yt_dlp=$(tools/bin/yt-dlp --version)
+          ffmpeg=$(tools/bin/ffmpeg -version | head -n 1 | awk '{print $3}')
+          {
+            echo "yt_dlp=${yt_dlp}"
+            echo "ffmpeg=${ffmpeg}"
+            echo "yt_dlp_sig=$(sha256sum tools/bin/yt-dlp | awk '{print $1}')"
+            echo "ffmpeg_sig=$(sha256sum ffmpeg.tar.xz | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+          echo "yt-dlp ${yt_dlp}, FFmpeg ${ffmpeg}"
+
+      - name: Check whether a rebuild is needed
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status=0
+          curl -fsSL -o previous.json \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/versions.json" \
+            || status=$?
+
+          if [ "$GITHUB_EVENT_NAME" = "push" ] || [ "$status" -ne 0 ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "reason=source push or no previous release" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          previous_ytdlp=$(python3 -c 'import json; print(json.load(open("previous.json")).get("yt_dlp_sig", ""))')
+          previous_ffmpeg=$(python3 -c 'import json; print(json.load(open("previous.json")).get("ffmpeg_sig", ""))')
+
+          if [ "$previous_ytdlp" != "${{ steps.tools.outputs.yt_dlp_sig }}" ] \
+             || [ "$previous_ffmpeg" != "${{ steps.tools.outputs.ffmpeg_sig }}" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "reason=yt-dlp or FFmpeg update" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "reason=tools unchanged" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute release tag
+        if: steps.changes.outputs.build == 'true'
+        id: tag
+        run: echo "tag=v$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.changes.outputs.build == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Cache Cargo
+        if: steps.changes.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build static binary
+        if: steps.changes.outputs.build == 'true'
+        env:
+          BUILD_TAG: ${{ steps.tag.outputs.tag }}
+          GIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Create version metadata
+        if: steps.changes.outputs.build == 'true'
+        env:
+          BUILD_TAG: ${{ steps.tag.outputs.tag }}
+          GIT_SHA: ${{ github.sha }}
+          YTDLP_VERSION: ${{ steps.tools.outputs.yt_dlp }}
+          FFMPEG_VERSION: ${{ steps.tools.outputs.ffmpeg }}
+          YTDLP_SIG: ${{ steps.tools.outputs.yt_dlp_sig }}
+          FFMPEG_SIG: ${{ steps.tools.outputs.ffmpeg_sig }}
+        run: python3 .github/scripts/write_versions.py dist/versions.json
+
+      - name: Package release bundle
+        if: steps.changes.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          bundle=dist/ytdl-bot
+          mkdir -p "$bundle/bin" "$bundle/systemd"
+
+          cp target/x86_64-unknown-linux-musl/release/ytdl-bot "$bundle/ytdl-bot"
+          cp tools/bin/yt-dlp tools/bin/ffmpeg tools/bin/ffprobe "$bundle/bin/"
+          cp packaging/update.sh "$bundle/update.sh"
+          cp packaging/systemd/ytdl-bot.service "$bundle/systemd/"
+          cp packaging/systemd/ytdl-bot-update.service "$bundle/systemd/"
+          cp packaging/systemd/ytdl-bot-update.timer "$bundle/systemd/"
+          cp README.md THIRD_PARTY_NOTICES.md LICENSE "$bundle/"
+          cp dist/versions.json "$bundle/versions.json"
+
+          chmod 0755 "$bundle/ytdl-bot" "$bundle/bin/yt-dlp" \
+            "$bundle/bin/ffmpeg" "$bundle/bin/ffprobe" "$bundle/update.sh"
+
+          file "$bundle/ytdl-bot"
+          if ! file "$bundle/ytdl-bot" | grep -Eq 'statically linked|static-pie linked'; then
+            echo "::error::release binary is not static"
+            exit 1
+          fi
+
+          tar -C dist -cJf "dist/${ASSET_NAME}" ytdl-bot
+          (cd dist && sha256sum "${ASSET_NAME}" versions.json > SHA256SUMS)
+          ls -lh "dist/${ASSET_NAME}" dist/versions.json dist/SHA256SUMS
+
+      - name: Prepare release notes
+        if: steps.changes.outputs.build == 'true'
+        env:
+          BUILD_TAG: ${{ steps.tag.outputs.tag }}
+          REASON: ${{ steps.changes.outputs.reason }}
+          YTDLP_VERSION: ${{ steps.tools.outputs.yt_dlp }}
+          FFMPEG_VERSION: ${{ steps.tools.outputs.ffmpeg }}
+        run: |
+          cat > dist/release-notes.md <<EOF
+          Automated ytdl-bot release.
+
+          - **Build:** \`${BUILD_TAG}\`
+          - **yt-dlp:** \`${YTDLP_VERSION}\`
+          - **FFmpeg:** \`${FFMPEG_VERSION}\`
+          - **Trigger:** ${REASON}
+
+          The release bundle contains the static \`ytdl-bot\` binary, \`yt-dlp\`,
+          \`ffmpeg\`, and \`ffprobe\`. Installed servers update automatically via
+          \`ytdl-bot-update.timer\`.
+
+          Install:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/komenome/ytdl-bot/main/install.sh | sudo bash
+          \`\`\`
+          EOF
+          sed -i 's/^[[:space:]]*//' dist/release-notes.md
+
+      - name: Publish release
+        if: steps.changes.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          assets=("dist/${ASSET_NAME}" dist/versions.json dist/SHA256SUMS)
+          if gh release view "$BUILD_TAG" >/dev/null 2>&1; then
+            gh release upload "$BUILD_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$BUILD_TAG" "${assets[@]}" \
+              --title "ytdl-bot ${BUILD_TAG}" \
+              --notes-file dist/release-notes.md \
+              --latest
+          fi
